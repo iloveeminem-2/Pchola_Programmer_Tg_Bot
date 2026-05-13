@@ -4,7 +4,7 @@
   "description": "AI-powered Telegram bot with Claude and Codex support",
   "main": "telegram_bot.js",
   "scripts": {
-    "start": "node telegram_bot.js"
+    "start": "node bot.js"
   },
   "keywords": [
     "telegram",
