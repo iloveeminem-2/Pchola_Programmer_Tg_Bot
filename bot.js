@@ -6,7 +6,7 @@ const fs = require('fs');
 // ─── Настройки ───────────────────────────────────────────────
 const ADMIN_ID = 1151575407666139291; // Замени на свой Telegram ID
 const REQUESTS_FILE = 'requests.json';
-const CLAUDE_MODEL = 'claude-3-5-sonnet-20241022'; // Дешевле чем 4.7!
+const CLAUDE_MODEL = 'claude-4-7'; // Дешевле чем 4.7!
 const CODEX_MODEL = 'gpt-5.5';
 const MAX_HISTORY = 20;
 
