@@ -1,16 +1,32 @@
 const { Telegraf } = require('telegraf');
-const Anthropic = require('@anthropic-ai/sdk');
-const OpenAI = require('openai');
 const fs = require('fs');
+const https = require('https');
+
+// ─── Проверка переменных окружения ──────────────────────────
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const CODEX_API_KEY = process.env.CODEX_API_KEY;
+
+if (!TELEGRAM_TOKEN) {
+  console.error('❌ ОШИБКА: TELEGRAM_TOKEN не установлена!');
+  process.exit(1);
+}
+if (!ANTHROPIC_API_KEY) {
+  console.error('❌ ОШИБКА: ANTHROPIC_API_KEY не установлена!');
+  process.exit(1);
+}
+if (!CODEX_API_KEY) {
+  console.error('❌ ОШИБКА: CODEX_API_KEY не установлена!');
+  process.exit(1);
+}
 
 // ─── Настройки ───────────────────────────────────────────────
-const ADMIN_ID = 1151575407666139291; // Замени на свой Telegram ID
+const ADMIN_ID = parseInt(process.env.ADMIN_ID) || 1151575407666139291;
 const REQUESTS_FILE = 'requests.json';
-const CLAUDE_MODEL = 'claude-4-7'; // Дешевле чем 4.7!
-const CODEX_MODEL = 'gpt-5.5';
+const CLAUDE_MODEL = 'claude-3-5-sonnet-20241022';
 const MAX_HISTORY = 20;
 
-// ─── История чатов (в памяти) ────────────────────────────────
+// ─── История и данные ────────────────────────────────────────
 const chatHistory = new Map();
 
 function getHistory(userId) {
@@ -21,16 +37,13 @@ function getHistory(userId) {
 function addToHistory(userId, role, content) {
   const history = getHistory(userId);
   history.push({ role, content });
-  if (history.length > MAX_HISTORY) {
-    history.splice(0, history.length - MAX_HISTORY);
-  }
+  if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
 }
 
 function clearHistory(userId) {
   chatHistory.set(userId, []);
 }
 
-// ─── Загрузка/сохранение запросов ────────────────────────────
 function loadRequests() {
   if (!fs.existsSync(REQUESTS_FILE)) fs.writeFileSync(REQUESTS_FILE, JSON.stringify({}));
   return JSON.parse(fs.readFileSync(REQUESTS_FILE, 'utf8'));
@@ -50,64 +63,103 @@ function setRequests(userId, count) {
   saveRequests(data);
 }
 
-// ─── Разбивка длинного текста на части ───────────────────────
-function splitMessage(text, maxLength = 4000) {
-  const parts = [];
-  while (text.length > 0) {
-    if (text.length <= maxLength) {
-      parts.push(text);
-      break;
-    }
-    let splitAt = text.lastIndexOf('\n', maxLength);
-    if (splitAt === -1) splitAt = maxLength;
-    parts.push(text.slice(0, splitAt));
-    text = text.slice(splitAt).trimStart();
-  }
-  return parts;
+// ─── Функция для HTTPS запросов ─────────────────────────────
+function httpsRequest(hostname, path, method, headers, data) {
+  return new Promise((resolve, reject) => {
+    const options = { hostname, path, method, headers };
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch (e) {
+          reject(new Error(`Parse error: ${e.message}`));
+        }
+      });
+    });
+    req.on('error', reject);
+    if (data) req.write(JSON.stringify(data));
+    req.end();
+  });
 }
 
-// ─── Универсальная отправка ответа ───────────────────────────
-async function sendReply(ctx, reply, remaining) {
-  const footer = `\n\n_Осталось запросов: *${remaining}*_`;
-  const fullReply = reply + footer;
-  
-  if (fullReply.length > 4000) {
-    const parts = splitMessage(reply);
-    for (let i = 0; i < parts.length; i++) {
-      const isLast = i === parts.length - 1;
-      const text = parts[i] + (isLast ? footer : '');
-      if (i === 0) {
-        await ctx.reply(text, { parse_mode: 'Markdown' });
-      } else {
-        await ctx.telegram.sendMessage(ctx.chat.id, text, { parse_mode: 'Markdown' });
+// ─── Claude API ──────────────────────────────────────────────
+async function askClaude(messages) {
+  try {
+    const response = await httpsRequest(
+      'api.gngn.my',
+      '/v1/messages',
+      'POST',
+      {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      {
+        model: CLAUDE_MODEL,
+        max_tokens: 1024,
+        messages: messages
       }
-    }
-  } else {
-    await ctx.reply(fullReply, { parse_mode: 'Markdown' });
+    );
+    
+    return response.content?.[0]?.text || response.message || 'Нет ответа';
+  } catch (e) {
+    throw new Error(`Claude API: ${e.message}`);
   }
 }
 
-// ─── Клиенты ─────────────────────────────────────────────────
-const bot = new Telegraf(process.env.TELEGRAM_TOKEN);
+// ─── Codex API ──────────────────────────────────────────────
+async function askCodex(messages) {
+  try {
+    const response = await httpsRequest(
+      'codex.sale',
+      '/v1/chat/completions',
+      'POST',
+      {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${CODEX_API_KEY}`
+      },
+      {
+        model: 'gpt-3.5-turbo',
+        messages: messages,
+        max_tokens: 2048
+      }
+    );
+    
+    return response.choices?.[0]?.message?.content || 'Нет ответа';
+  } catch (e) {
+    throw new Error(`Codex API: ${e.message}`);
+  }
+}
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-  baseURL: 'https://api.gngn.my',
+// ─── Telegram Bot ────────────────────────────────────────────
+const bot = new Telegraf(TELEGRAM_TOKEN);
+
+// /start
+bot.command('start', async (ctx) => {
+  const help = `
+🤖 *Добро пожаловать!*
+
+Команды:
+  • \`/claude вопрос\` - спросить Claude
+  • \`/codex вопрос\` - спросить Codex
+  • \`/tokens\` - показать запросы
+  • \`/cclear\` - очистить историю
+  • \`/cgive число userid\` - выдать запросы (админ)
+
+*Примеры:*
+  \`/claude Как работает AI?\`
+  \`/codex Напиши код для сортировки\`
+  `;
+  await ctx.reply(help, { parse_mode: 'Markdown' });
 });
 
-const codex = new OpenAI({
-  apiKey: process.env.CODEX_API_KEY,
-  baseURL: 'https://codex.sale/v1',
-});
-
-// ─── Обработка команд ────────────────────────────────────────
-
-// /claude <вопрос>
+// /claude
 bot.command('claude', async (ctx) => {
   const text = ctx.message.text.replace('/claude', '').trim();
-
   if (!text) {
-    await ctx.reply('❌ Напишите вопрос после `/claude`.');
+    await ctx.reply('❌ Напишите вопрос после `/claude`');
     return;
   }
 
@@ -115,7 +167,7 @@ bot.command('claude', async (ctx) => {
   const remaining = getRequests(userId);
 
   if (remaining <= 0) {
-    await ctx.reply('❌ У вас закончились запросы. Обратитесь к администратору.');
+    await ctx.reply('❌ Запросы закончились. Обратитесь к админу.');
     return;
   }
 
@@ -124,34 +176,23 @@ bot.command('claude', async (ctx) => {
 
   try {
     await ctx.sendChatAction('typing');
-
-    const stream = await anthropic.messages.stream({
-      model: CLAUDE_MODEL,
-      max_tokens: 2048,
-      messages: getHistory(userId),
-    });
-
-    const response = await stream.finalMessage();
-    const reply = response.content[0].text;
+    const reply = await askClaude(getHistory(userId));
     addToHistory(userId, 'assistant', reply);
-    await sendReply(ctx, reply, remaining - 1);
+    await ctx.reply(`${reply}\n\n_Осталось: ${remaining - 1}_`, { parse_mode: 'Markdown' });
   } catch (e) {
-    log('ERROR', `Claude API error: ${e.constructor.name}: ${e.message}`);
+    console.error(`Claude error: ${e.message}`);
     const history = getHistory(userId);
     if (history.at(-1)?.role === 'user') history.pop();
     setRequests(userId, remaining);
-    await ctx.reply(`❌ Ошибка Claude: \`${e.constructor.name}: ${String(e.message).slice(0, 200)}\``, {
-      parse_mode: 'Markdown',
-    });
+    await ctx.reply(`❌ Ошибка: ${e.message}`, { parse_mode: 'Markdown' });
   }
 });
 
-// /codex <вопрос>
+// /codex
 bot.command('codex', async (ctx) => {
   const text = ctx.message.text.replace('/codex', '').trim();
-
   if (!text) {
-    await ctx.reply('❌ Напишите вопрос после `/codex`.');
+    await ctx.reply('❌ Напишите вопрос после `/codex`');
     return;
   }
 
@@ -159,7 +200,7 @@ bot.command('codex', async (ctx) => {
   const remaining = getRequests(userId);
 
   if (remaining <= 0) {
-    await ctx.reply('❌ У вас закончились запросы. Обратитесь к администратору.');
+    await ctx.reply('❌ Запросы закончились. Обратитесь к админу.');
     return;
   }
 
@@ -168,127 +209,60 @@ bot.command('codex', async (ctx) => {
 
   try {
     await ctx.sendChatAction('typing');
-
-    const response = await codex.chat.completions.create({
-      model: CODEX_MODEL,
-      messages: getHistory(userId),
-      max_tokens: 4096,
-    });
-
-    const reply = response.choices[0].message.content;
+    const reply = await askCodex(getHistory(userId));
     addToHistory(userId, 'assistant', reply);
-    await sendReply(ctx, reply, remaining - 1);
+    await ctx.reply(`${reply}\n\n_Осталось: ${remaining - 1}_`, { parse_mode: 'Markdown' });
   } catch (e) {
-    log('ERROR', `Codex API error: ${e.constructor.name}: ${e.message}`);
+    console.error(`Codex error: ${e.message}`);
     const history = getHistory(userId);
     if (history.at(-1)?.role === 'user') history.pop();
     setRequests(userId, remaining);
-    await ctx.reply(`❌ Ошибка Codex: \`${e.constructor.name}: ${String(e.message).slice(0, 200)}\``, {
-      parse_mode: 'Markdown',
-    });
+    await ctx.reply(`❌ Ошибка: ${e.message}`, { parse_mode: 'Markdown' });
   }
 });
 
-// /tokens - показать количество запросов
+// /tokens
 bot.command('tokens', async (ctx) => {
   const userId = ctx.from.id;
   const remaining = getRequests(userId);
-  await ctx.reply(`🔑 У вас осталось *${remaining}* запросов.`, { parse_mode: 'Markdown' });
+  await ctx.reply(`🔑 Осталось запросов: *${remaining}*`, { parse_mode: 'Markdown' });
 });
 
-// /cclear - очистить историю
+// /cclear
 bot.command('cclear', async (ctx) => {
   const userId = ctx.from.id;
   clearHistory(userId);
-  await ctx.reply('🗑️ История вашего чата очищена.');
+  await ctx.reply('🗑️ История очищена');
 });
 
-// /cgive <число> - выдать запросы (только админ)
+// /cgive (админ команда)
 bot.command('cgive', async (ctx) => {
   const userId = ctx.from.id;
-
   if (userId !== ADMIN_ID) {
-    await ctx.reply('❌ У вас нет доступа к этой команде.');
+    await ctx.reply('❌ Доступ запрещён');
     return;
   }
 
-  const parts = ctx.message.text.split(/\s+/);
-  const amount = parseInt(parts[1]);
+  const args = ctx.message.text.split(/\s+/);
+  const amount = parseInt(args[1]);
+  const targetId = parseInt(args[2]);
 
-  if (!amount || amount <= 0) {
-    await ctx.reply('❌ Укажите корректное число запросов.\n\nИспользование: `/cgive <число> <user_id>`', {
-      parse_mode: 'Markdown',
-    });
-    return;
-  }
-
-  const targetId = parseInt(parts[2]);
-  if (!targetId) {
-    await ctx.reply('❌ Укажите ID пользователя.\n\nИспользование: `/cgive <число> <user_id>`', {
-      parse_mode: 'Markdown',
-    });
+  if (!amount || !targetId) {
+    await ctx.reply('Использование: `/cgive число userid`', { parse_mode: 'Markdown' });
     return;
   }
 
   const current = getRequests(targetId);
   setRequests(targetId, current + amount);
-
-  await ctx.reply(`✅ Пользователю \`${targetId}\` выдано *${amount}* запросов. Всего: *${current + amount}*`, {
-    parse_mode: 'Markdown',
-  });
+  await ctx.reply(`✅ Выдано ${amount} запросов. Всего: ${current + amount}`);
 });
-
-// /start - справка
-bot.command('start', async (ctx) => {
-  const helpText = `
-🤖 *Добро пожаловать!*
-
-Доступные команды:
-  • \`/claude <вопрос>\` - спросить Claude (3.5 Sonnet)
-  • \`/codex <вопрос>\` - спросить Codex
-  • \`/tokens\` - показать оставшиеся запросы
-  • \`/cclear\` - очистить историю чата
-
-*Примеры:*
-  \`/claude Как работает машинное обучение?\`
-  \`/codex Напиши код для сортировки массива\`
-  `;
-  await ctx.reply(helpText, { parse_mode: 'Markdown' });
-});
-
-// ─── Логирование ─────────────────────────────────────────────
-function log(level, message) {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] [${level}] ${message}`);
-}
 
 // ─── Запуск ──────────────────────────────────────────────────
 bot.launch();
 
-log('INFO', '✅ Telegram бот запущен');
-log('INFO', `Claude Model: ${CLAUDE_MODEL}`);
-log('INFO', `Codex Model: ${CODEX_MODEL}`);
-log('INFO', `Admin ID: ${ADMIN_ID}`);
-log('INFO', `Environment: ${process.env.NODE_ENV || 'production'}`);
+console.log('✅ Telegram бот запущен');
+console.log(`Model: ${CLAUDE_MODEL}`);
+console.log(`Admin ID: ${ADMIN_ID}`);
 
-// ─── Обработка сигналов ──────────────────────────────────────
-process.once('SIGINT', () => {
-  log('WARN', 'SIGINT получен - остановка бота');
-  bot.stop('SIGINT');
-});
-
-process.once('SIGTERM', () => {
-  log('WARN', 'SIGTERM получен - остановка бота');
-  bot.stop('SIGTERM');
-});
-
-// ─── Обработка необработанных ошибок ─────────────────────────
-process.on('unhandledRejection', (reason, promise) => {
-  log('ERROR', `Необработанное отклонение: ${reason}`);
-  console.error(promise);
-});
-
-process.on('uncaughtException', (error) => {
-  log('ERROR', `Необработанное исключение: ${error.message}`);
-  console.error(error);
-});
+process.on('SIGINT', () => bot.stop('SIGINT'));
+process.on('SIGTERM', () => bot.stop('SIGTERM'));
