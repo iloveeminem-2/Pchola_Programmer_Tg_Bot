@@ -1,0 +1,25 @@
+{
+  "name": "telegram-ai-bot",
+  "version": "1.0.0",
+  "description": "AI-powered Telegram bot with Claude and Codex support",
+  "main": "telegram_bot.js",
+  "scripts": {
+    "start": "node telegram_bot.js",
+    "dev": "node telegram_bot.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "claude",
+    "codex",
+    "ai"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.21.0",
+    "openai": "^4.52.0",
+    "telegraf": "^4.16.0",
+    "dotenv": "^16.4.5"
+  }
+}
